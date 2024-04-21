@@ -24,27 +24,47 @@ const (
 )
 
 const (
+	USER_AGENT    = "/user-agent"
 	ECHO          = "/echo/"
 	FORWARD_SLASH = "/"
 	WHITESPACE    = " "
 )
 
-type RequestHeader struct {
+type Request struct {
 	Method  string
-	Path    string
+	URL     string
 	Version string
+	Headers map[string]string
 }
 
-func CreateHeader(method, path, version string) *RequestHeader {
-	return &RequestHeader{
-		Method:  method,
-		Path:    path,
-		Version: version,
+func (r *Request) ParseHeaders(headers [][]byte) {
+	r.Headers = map[string]string{}
+	for _, v := range headers {
+		if string(v) == "" {
+			// \r\n before request body, all headers parsed
+			break
+		}
+		v := string(v)
+		h := strings.Split(v, ":")
+		name, value := strings.Trim(h[0], " "), strings.Trim(h[1], " ")
+		r.Headers[name] = value
 	}
 }
 
-func HandleEchoRequest(conn net.Conn, header *RequestHeader) {
-	data, found := strings.CutPrefix(header.Path, ECHO)
+func createRequest(buffer [][]byte) *Request {
+	reqInfo := bytes.Split(buffer[0], []byte(WHITESPACE))
+
+	req := &Request{
+		Method:  string(reqInfo[0]),
+		URL:     string(reqInfo[1]),
+		Version: string(reqInfo[2]),
+	}
+	req.ParseHeaders(buffer[1:])
+	return req
+}
+
+func handleEchoRequest(conn net.Conn, request *Request) {
+	data, found := strings.CutPrefix(request.URL, ECHO)
 
 	if !found {
 		conn.Write([]byte(INTERNAL_SERVER_ERROR))
@@ -52,31 +72,37 @@ func HandleEchoRequest(conn net.Conn, header *RequestHeader) {
 	contentType := CONTENT_TYPE + TEXT_PLAIN + CRLF
 	contentLength := CONTENT_LENGTH + strconv.Itoa(len(data)) + CRLF
 	response := OK + CRLF + contentType + contentLength + CRLF + data
-	fmt.Println(response)
 	conn.Write([]byte(response))
 }
 
-func HandleServerError(conn net.Conn) {
-	conn.Write([]byte(INTERNAL_SERVER_ERROR))
+func handleUserAgentRequest(conn net.Conn, request *Request) {
+	userAgent, ok := request.Headers["User-Agent"]
+	if !ok {
+		conn.Write([]byte(INTERNAL_SERVER_ERROR))
+	}
+	contentType := CONTENT_TYPE + TEXT_PLAIN + CRLF
+	contentLength := CONTENT_LENGTH + strconv.Itoa(len(userAgent)) + CRLF
+	response := OK + CRLF + contentType + contentLength + CRLF + userAgent
+	conn.Write([]byte(response))
 }
 
-func HandleConn(conn net.Conn) {
+func handleConn(conn net.Conn) {
 	defer conn.Close()
 	buffer := make([]byte, 1024)
 	_, err := conn.Read(buffer)
 	if err != nil {
 		fmt.Println("Error reading data")
-		conn.Close()
 		return
 	}
 	req := bytes.Split(buffer, []byte(CRLF))
-	reqInfo := bytes.Split(req[0], []byte(WHITESPACE))
-	header := CreateHeader(string(reqInfo[0]), string(reqInfo[1]), string(reqInfo[2]))
+	request := createRequest(req)
 	switch {
-	case header.Path == FORWARD_SLASH:
+	case request.URL == FORWARD_SLASH:
 		conn.Write([]byte(OK + CRLF + CRLF))
-	case strings.HasPrefix(header.Path, ECHO):
-		HandleEchoRequest(conn, header)
+	case strings.HasPrefix(request.URL, ECHO):
+		handleEchoRequest(conn, request)
+	case strings.HasPrefix(request.URL, USER_AGENT):
+		handleUserAgentRequest(conn, request)
 	default:
 		conn.Write([]byte(NOT_FOUND))
 	}
@@ -96,6 +122,6 @@ func main() {
 			fmt.Println("Error accepting connection: ", err.Error())
 			os.Exit(1)
 		}
-		HandleConn(conn)
+		handleConn(conn)
 	}
 }
