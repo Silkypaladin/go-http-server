@@ -2,10 +2,13 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -21,12 +24,14 @@ const (
 )
 
 const (
-	TEXT_PLAIN = "text/plain"
+	TEXT_PLAIN   = "text/plain"
+	OCTET_STREAM = "application/octet-stream"
 )
 
 const (
 	USER_AGENT    = "/user-agent"
 	ECHO          = "/echo/"
+	FILES         = "/files/"
 	FORWARD_SLASH = "/"
 	WHITESPACE    = " "
 )
@@ -87,6 +92,8 @@ func GetHandlerFuncUrl(url string) (string, bool) {
 		return "/echo", true
 	case strings.HasPrefix(url, USER_AGENT):
 		return "/user-agent", true
+	case strings.HasPrefix(url, FILES):
+		return "/files", true
 	default:
 		return "", false
 	}
@@ -104,6 +111,7 @@ func handleEchoRequest(conn net.Conn, request *Request) {
 
 	if !found {
 		conn.Write([]byte(INTERNAL_SERVER_ERROR))
+		return
 	}
 	contentType := CONTENT_TYPE + TEXT_PLAIN + CRLF
 	contentLength := CONTENT_LENGTH + strconv.Itoa(len(data)) + CRLF
@@ -115,6 +123,7 @@ func handleUserAgentRequest(conn net.Conn, request *Request) {
 	userAgent := request.Headers.Get("User-Agent")
 	if len(userAgent) == 0 {
 		conn.Write([]byte(INTERNAL_SERVER_ERROR))
+		return
 	}
 	contentType := CONTENT_TYPE + TEXT_PLAIN + CRLF
 	contentLength := CONTENT_LENGTH + strconv.Itoa(len(userAgent)) + CRLF
@@ -126,10 +135,42 @@ func handleRootRequest(conn net.Conn, request *Request) {
 	conn.Write([]byte(OK + CRLF + CRLF))
 }
 
+func handleGetFileRequest(conn net.Conn, request *Request) {
+	var rootDir string
+	if flag.Lookup("directory") == nil {
+		flag.StringVar(&rootDir, "directory", "", "Root directory to conduct a file search on")
+	}
+	flag.Parse()
+
+	filename, found := strings.CutPrefix(request.URL, FILES)
+
+	if !found {
+		conn.Write([]byte(INTERNAL_SERVER_ERROR))
+		return
+	}
+
+	path := filepath.Join(rootDir, filename)
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		conn.Write([]byte(NOT_FOUND))
+		return
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Println("Error reading file")
+		conn.Write([]byte(INTERNAL_SERVER_ERROR))
+	}
+	contentType := CONTENT_TYPE + OCTET_STREAM + CRLF
+	contentLength := CONTENT_LENGTH + strconv.Itoa(len(data)) + CRLF
+	response := OK + CRLF + contentType + contentLength + CRLF + string(data)
+	conn.Write([]byte(response))
+}
+
 func main() {
 	server := CreateServer("0.0.0.0:4221")
 	server.AddHandler("/echo", handleEchoRequest)
 	server.AddHandler("/user-agent", handleUserAgentRequest)
 	server.AddHandler("/", handleRootRequest)
+	server.AddHandler("/files", handleGetFileRequest)
 	server.Serve()
 }
