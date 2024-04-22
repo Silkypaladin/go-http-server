@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"strconv"
@@ -30,37 +31,72 @@ const (
 	WHITESPACE    = " "
 )
 
-type Request struct {
-	Method  string
-	URL     string
-	Version string
-	Headers map[string]string
+type HandlerFunc func(net.Conn, *Request)
+
+type Server struct {
+	Addr     string
+	Handlers map[string]HandlerFunc
 }
 
-func (r *Request) ParseHeaders(headers [][]byte) {
-	r.Headers = map[string]string{}
-	for _, v := range headers {
-		if string(v) == "" {
-			// \r\n before request body, all headers parsed
-			break
+func (s *Server) AddHandler(url string, handlerFunc HandlerFunc) {
+	_, exists := s.Handlers[url]
+	if exists {
+		log.Fatalf("Handler for %s already exists", url)
+	}
+	s.Handlers[url] = handlerFunc
+}
+
+func (s *Server) HandleConn(conn net.Conn) {
+	defer conn.Close()
+	buffer := make([]byte, 1024)
+	_, err := conn.Read(buffer)
+	if err != nil {
+		fmt.Println("Error reading data")
+		return
+	}
+	req := bytes.Split(buffer, []byte(CRLF))
+	request := NewRequest(req)
+	url, found := GetHandlerFuncUrl(request.URL)
+	if !found {
+		conn.Write([]byte(NOT_FOUND))
+	}
+	s.Handlers[url](conn, request)
+}
+
+func (s *Server) Serve() {
+	l, err := net.Listen("tcp", s.Addr)
+	if err != nil {
+		fmt.Printf("Failed to bind to address %s", s.Addr)
+		os.Exit(1)
+	}
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			fmt.Println("Error accepting connection: ", err.Error())
+			continue
 		}
-		v := string(v)
-		h := strings.Split(v, ":")
-		name, value := strings.Trim(h[0], " "), strings.Trim(h[1], " ")
-		r.Headers[name] = value
+		go s.HandleConn(conn)
 	}
 }
 
-func createRequest(buffer [][]byte) *Request {
-	reqInfo := bytes.Split(buffer[0], []byte(WHITESPACE))
-
-	req := &Request{
-		Method:  string(reqInfo[0]),
-		URL:     string(reqInfo[1]),
-		Version: string(reqInfo[2]),
+func GetHandlerFuncUrl(url string) (string, bool) {
+	switch {
+	case url == FORWARD_SLASH:
+		return "/", true
+	case strings.HasPrefix(url, ECHO):
+		return "/echo", true
+	case strings.HasPrefix(url, USER_AGENT):
+		return "/user-agent", true
+	default:
+		return "", false
 	}
-	req.ParseHeaders(buffer[1:])
-	return req
+}
+
+func CreateServer(addr string) *Server {
+	return &Server{
+		Addr:     addr,
+		Handlers: map[string]HandlerFunc{},
+	}
 }
 
 func handleEchoRequest(conn net.Conn, request *Request) {
@@ -76,8 +112,8 @@ func handleEchoRequest(conn net.Conn, request *Request) {
 }
 
 func handleUserAgentRequest(conn net.Conn, request *Request) {
-	userAgent, ok := request.Headers["User-Agent"]
-	if !ok {
+	userAgent := request.Headers.Get("User-Agent")
+	if len(userAgent) == 0 {
 		conn.Write([]byte(INTERNAL_SERVER_ERROR))
 	}
 	contentType := CONTENT_TYPE + TEXT_PLAIN + CRLF
@@ -86,42 +122,14 @@ func handleUserAgentRequest(conn net.Conn, request *Request) {
 	conn.Write([]byte(response))
 }
 
-func handleConn(conn net.Conn) {
-	defer conn.Close()
-	buffer := make([]byte, 1024)
-	_, err := conn.Read(buffer)
-	if err != nil {
-		fmt.Println("Error reading data")
-		return
-	}
-	req := bytes.Split(buffer, []byte(CRLF))
-	request := createRequest(req)
-	switch {
-	case request.URL == FORWARD_SLASH:
-		conn.Write([]byte(OK + CRLF + CRLF))
-	case strings.HasPrefix(request.URL, ECHO):
-		handleEchoRequest(conn, request)
-	case strings.HasPrefix(request.URL, USER_AGENT):
-		handleUserAgentRequest(conn, request)
-	default:
-		conn.Write([]byte(NOT_FOUND))
-	}
+func handleRootRequest(conn net.Conn, request *Request) {
+	conn.Write([]byte(OK + CRLF + CRLF))
 }
 
 func main() {
-	fmt.Println("Starting server...")
-
-	l, err := net.Listen("tcp", "0.0.0.0:4221")
-	if err != nil {
-		fmt.Println("Failed to bind to port 4221")
-		os.Exit(1)
-	}
-	for {
-		conn, err := l.Accept()
-		if err != nil {
-			fmt.Println("Error accepting connection: ", err.Error())
-			os.Exit(1)
-		}
-		handleConn(conn)
-	}
+	server := CreateServer("0.0.0.0:4221")
+	server.AddHandler("/echo", handleEchoRequest)
+	server.AddHandler("/user-agent", handleUserAgentRequest)
+	server.AddHandler("/", handleRootRequest)
+	server.Serve()
 }
